@@ -39,9 +39,10 @@ ENV MODELSCOPE_CACHE=/models
 
 # Create model cache directory (helps reuse between restarts)
 RUN mkdir -p /models
+RUN mkdir -p /data/voice-stack/data/voiceprints && chmod 700 /data/voice-stack/data/voiceprints
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5m --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:50000/', timeout=3)" || exit 1
+    CMD python -c "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:50000/api/v1/health', timeout=3); payload = json.load(response); raise SystemExit(0 if payload.get('asr_ready') else 1)" || exit 1
 
-# Start FastAPI app
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "50000"]
+# 启动包含外部鉴权、实时对话与原有 ASR 接口的服务。
+CMD ["uvicorn", "realtime_api:app", "--host", "0.0.0.0", "--port", "50000"]

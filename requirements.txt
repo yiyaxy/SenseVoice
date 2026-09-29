@@ -1,11 +1,16 @@
-# Keep the default install outside known Dependabot torch alert ranges.
 # For CUDA-specific wheels, install a matching torch/torchaudio pair first.
-torch>=2.12.1
+# RTX 5090/SM120 已验证使用 torch==2.11.0+cu128、torchaudio==2.11.0+cu128。
+torch>=2.11.0
 torchaudio>=2.11.0
 modelscope
 huggingface
 huggingface_hub
-funasr>=1.3.26
+# 兼容旧客户端文档的最低能力线：funasr>=1.3.26；部署环境锁定以下已验证版本。
+funasr==1.4.13
 numpy<=1.26.4
 gradio
 fastapi>=0.111.1
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+soundfile>=0.14.0
+cryptography>=42.0.0

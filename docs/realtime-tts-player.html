@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SenseVoice 实时 TTS 播放器</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { max-width: 880px; margin: 2rem auto; padding: 0 1rem; }
+      label { display: block; margin: .8rem 0 .25rem; }
+      input, select, textarea, button { box-sizing: border-box; width: 100%; padding: .55rem; font: inherit; }
+      textarea { min-height: 7rem; resize: vertical; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+      .actions { display: flex; gap: .75rem; margin-top: 1rem; }
+      .actions button { width: auto; min-width: 8rem; }
+      #status { white-space: pre-wrap; min-height: 5rem; padding: .75rem; background: #2222; border-radius: .4rem; }
+      @media (max-width: 680px) { .row { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <h1>SenseVoice 实时 TTS 播放器</h1>
+    <p>仅用于开发联调：浏览器会携带 API Key 连接独立 TTS WebSocket，并使用 AudioWorklet 播放 PCM16。</p>
+
+    <label for="url">WebSocket 地址</label>
+    <input id="url" value="ws://localhost:50001/api/v1/tts/stream" />
+    <label for="apiKey">SENSEVOICE_API_KEY（仅开发环境）</label>
+    <input id="apiKey" type="password" autocomplete="off" />
+
+    <div class="row">
+      <div>
+        <label for="voice">授权音色</label>
+        <select id="voice"><option value="assistant_default">assistant_default</option></select>
+      </div>
+      <div>
+        <label for="language">合成语言</label>
+        <select id="language">
+          <option value="zh">中文</option>
+          <option value="yue">粤语</option>
+          <option value="en">英语</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="mode">GPT-SoVITS 流式模式</label>
+    <select id="mode">
+      <option value="1">1（质量基线）</option>
+      <option value="2" selected>2（均衡）</option>
+      <option value="3">3（低延迟对照）</option>
+    </select>
+
+    <label for="text">文本</label>
+    <textarea id="text">你好，欢迎使用实时语音服务。</textarea>
+    <div class="actions">
+      <button id="connect">连接</button>
+      <button id="synthesize" disabled>合成并播放</button>
+      <button id="cancel" disabled>停止当前请求</button>
+    </div>
+    <p id="status">未连接</p>
+
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const status = $("status");
+      let socket = null;
+      let audioContext = null;
+      let playerNode = null;
+      let pendingPcmChunks = [];
+      let activeRequestId = null;
+      let acceptBinaryAudio = false;
+      let sessionReady = false;
+      let requestStartedAt = 0;
+      let playbackStartedAt = null;
+
+      // 在 AudioWorklet 中把服务端采样率重采样到当前播放设备采样率。
+      const workletSource = `
+        class SenseVoicePcmProcessor extends AudioWorkletProcessor {
+          constructor() {
+            super();
+            this.queue = [];
+            this.sourceRate = sampleRate;
+            this.position = 0;
+            this.firstSampleReported = false;
+            this.port.onmessage = ({ data }) => {
+              if (data.type === "format") this.sourceRate = Number(data.sampleRate) || sampleRate;
+              if (data.type === "chunk") this.queue.push(new Float32Array(data.samples));
+              if (data.type === "reset") {
+                this.queue = [];
+                this.position = 0;
+                this.firstSampleReported = false;
+              }
+            };
+          }
+          process(_inputs, outputs) {
+            const output = outputs[0]?.[0];
+            if (!output) return true;
+            const ratio = this.sourceRate / sampleRate;
+            for (let i = 0; i < output.length; i += 1) {
+              // 一个网络帧结束时可能已经跨过当前块；先连续消费完空块，避免每个块之间插入静音样本。
+              while (this.queue[0] && this.position >= this.queue[0].length) {
+                this.position -= this.queue[0].length;
+                this.queue.shift();
+              }
+              const current = this.queue[0];
+              if (!current) {
+                output[i] = 0;
+                continue;
+              }
+              const index = Math.floor(this.position);
+              const next = current[index + 1] ?? current[index];
+              const fraction = this.position - index;
+              if (!this.firstSampleReported) {
+                this.firstSampleReported = true;
+                this.port.postMessage({ type: "first-sample" });
+              }
+              output[i] = current[index] + (next - current[index]) * fraction;
+              this.position += ratio;
+            }
+            return true;
+          }
+        }
+        registerProcessor("sensevoice-pcm", SenseVoicePcmProcessor);
+      `;
+
+      function setStatus(message) {
+        status.textContent = message;
+      }
+
+      function makeRequestId() {
+        if (crypto.randomUUID) return crypto.randomUUID();
+        return `tts-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+
+      async function ensurePlayer(sampleRate) {
+        if (!audioContext) {
+          audioContext = new AudioContext({ latencyHint: "interactive" });
+          const moduleUrl = URL.createObjectURL(new Blob([workletSource], { type: "text/javascript" }));
+          await audioContext.audioWorklet.addModule(moduleUrl);
+          URL.revokeObjectURL(moduleUrl);
+          playerNode = new AudioWorkletNode(audioContext, "sensevoice-pcm");
+          playerNode.connect(audioContext.destination);
+          playerNode.port.addEventListener("message", ({ data }) => {
+            if (data?.type !== "first-sample" || playbackStartedAt !== null) return;
+            playbackStartedAt = performance.now();
+            const elapsed = Math.round(playbackStartedAt - requestStartedAt);
+            setStatus(`客户端已开始播放（提交后 ${elapsed} ms）`);
+          });
+        }
+        await audioContext.resume();
+        playerNode.port.postMessage({ type: "format", sampleRate });
+        // tts.start 初始化 AudioWorklet 时，首个二进制帧可能已经到达；初始化完成后按顺序补发。
+        const pending = pendingPcmChunks;
+        pendingPcmChunks = [];
+        for (const samples of pending) {
+          playerNode.port.postMessage({ type: "chunk", samples }, [samples.buffer]);
+        }
+      }
+
+      function stopPlayback() {
+        pendingPcmChunks = [];
+        playerNode?.port.postMessage({ type: "reset" });
+      }
+
+      function sendJson(event) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("WebSocket 未连接");
+        socket.send(JSON.stringify(event));
+      }
+
+      function installSocketHandlers(connectedSocket) {
+        const ws = connectedSocket;
+        ws.binaryType = "arraybuffer";
+        ws.addEventListener("open", () => {
+          if (socket !== ws) return;
+          sessionReady = false;
+          setStatus("已连接，等待 session.ready…");
+        });
+        ws.addEventListener("close", (event) => {
+          if (socket !== ws) return;
+          sessionReady = false;
+          acceptBinaryAudio = false;
+          stopPlayback();
+          $("synthesize").disabled = true;
+          $("cancel").disabled = true;
+          setStatus(`连接关闭：${event.code} ${event.reason || ""}`);
+        });
+        ws.addEventListener("error", () => {
+          if (socket === ws) setStatus("WebSocket 连接错误，请检查地址、隧道和 API Key。");
+        });
+        ws.addEventListener("message", async ({ data }) => {
+          if (socket !== ws) return;
+          if (typeof data !== "string") {
+            // 每个二进制帧都是当前 request_id 对应的 PCM16 little-endian 样本。
+            if (!acceptBinaryAudio) return;
+            const bytes = data instanceof ArrayBuffer
+              ? new Uint8Array(data)
+              : new Uint8Array(await data.arrayBuffer());
+            if (socket !== ws || !acceptBinaryAudio) return;
+            if (bytes.byteLength % 2 !== 0) {
+              acceptBinaryAudio = false;
+              stopPlayback();
+              setStatus("服务返回未按 16 bit 对齐的 PCM 帧，已停止播放。 ");
+              return;
+            }
+            const samples = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+            const floatSamples = Float32Array.from(samples, (value) => value / 32768);
+            if (!playerNode) {
+              // 仅覆盖 tts.start 与 AudioWorklet 初始化之间的短竞态，不让首个音频帧静默丢失。
+              pendingPcmChunks.push(floatSamples);
+            } else {
+              playerNode.port.postMessage({ type: "chunk", samples: floatSamples }, [floatSamples.buffer]);
+            }
+            return;
+          }
+          let event;
+          try {
+            event = JSON.parse(data);
+          } catch (_error) {
+            acceptBinaryAudio = false;
+            stopPlayback();
+            setStatus("服务返回了无效 JSON，已停止播放。 ");
+            return;
+          }
+          if (!event || typeof event !== "object" || Array.isArray(event)) {
+            acceptBinaryAudio = false;
+            stopPlayback();
+            setStatus("服务返回了无效事件，已停止播放。 ");
+            return;
+          }
+          // 带 request_id 的事件只能属于当前请求；即使当前请求已结束，
+          // 也不能让迟到的旧 tts.start 重新打开 PCM 接收。
+          if (event.request_id && event.request_id !== activeRequestId) return;
+          if (event.type === "session.ready") {
+            sessionReady = true;
+            const voices = Array.isArray(event.voices)
+              ? event.voices.filter(
+                (item) => item && typeof item === "object"
+                  && typeof item.voice_id === "string"
+                  && typeof item.name === "string",
+              )
+              : [];
+            $("voice").replaceChildren(...voices.map((item) => new Option(`${item.name} (${item.voice_id})`, item.voice_id)));
+            if (event.voice_id) $("voice").value = event.voice_id;
+            sendJson({
+              type: "configure",
+              voice_id: $("voice").value,
+              text_lang: $("language").value,
+              streaming_mode: Number($("mode").value),
+            });
+            $("synthesize").disabled = false;
+            setStatus(`已就绪，默认音色：${event.voice_id || "未配置"}`);
+          } else if (event.type === "tts.start") {
+            // 只接收当前已声明片段的 PCM；取消/end 后到达的旧帧直接丢弃。
+            if (
+              event.format !== "pcm_s16le"
+              || Number(event.channels) !== 1
+              || Number(event.sample_width) !== 2
+              || !Number.isFinite(Number(event.sample_rate))
+              || Number(event.sample_rate) <= 0
+            ) {
+              acceptBinaryAudio = false;
+              stopPlayback();
+              setStatus("服务返回了不支持的 PCM 格式，已停止播放。 ");
+              return;
+            }
+            acceptBinaryAudio = true;
+            playbackStartedAt = null;
+            await ensurePlayer(event.sample_rate);
+            setStatus(`开始播放：${event.voice_id}，${event.sample_rate} Hz，${event.text}`);
+          } else if (event.type === "tts.end") {
+            acceptBinaryAudio = false;
+            const elapsed = Math.round(performance.now() - requestStartedAt);
+            const playback = playbackStartedAt === null
+              ? "客户端尚未开始出声"
+              : `客户端首播 ${Math.round(playbackStartedAt - requestStartedAt)} ms`;
+            setStatus(`生成完成：服务端首包 ${event.first_audio_ms ?? "-"} ms，总耗时 ${event.total_ms ?? "-"} ms；${playback}；客户端已接收 ${elapsed} ms。播放器可能仍在播放。`);
+            $("synthesize").disabled = false;
+            $("cancel").disabled = true;
+            activeRequestId = null;
+          } else if (event.type === "tts.cancelled") {
+            acceptBinaryAudio = false;
+            stopPlayback();
+            playbackStartedAt = null;
+            $("synthesize").disabled = false;
+            $("cancel").disabled = true;
+            activeRequestId = null;
+            setStatus("已停止当前请求，并清空未播放缓冲。 ");
+          } else if (event.type === "tts.error" || event.type === "error") {
+            acceptBinaryAudio = false;
+            stopPlayback();
+            playbackStartedAt = null;
+            setStatus(`服务错误：${event.code || "unknown"}`);
+            $("synthesize").disabled = false;
+            $("cancel").disabled = true;
+            activeRequestId = null;
+          }
+        });
+      }
+
+      $("connect").addEventListener("click", () => {
+        socket?.close();
+        const apiKey = $("apiKey").value.trim();
+        if (!apiKey) { setStatus("请输入开发环境 API Key。 "); return; }
+        socket = new WebSocket($("url").value.trim(), ["sensevoice", apiKey]);
+        installSocketHandlers(socket);
+      });
+
+      $("synthesize").addEventListener("click", async () => {
+        try {
+          if (!sessionReady) throw new Error("尚未收到 session.ready");
+          await ensurePlayer(32000);
+          stopPlayback();
+          acceptBinaryAudio = false;
+          activeRequestId = makeRequestId();
+          playbackStartedAt = null;
+          requestStartedAt = performance.now();
+          $("synthesize").disabled = true;
+          sendJson({ type: "synthesize", request_id: activeRequestId, text: $("text").value.trim() });
+          $("cancel").disabled = false;
+          setStatus("已提交文本，等待首个 PCM 音频块…");
+        } catch (error) {
+          $("synthesize").disabled = false;
+          setStatus(`提交失败：${error.message}`);
+        }
+      });
+
+      $("cancel").addEventListener("click", () => {
+        if (!activeRequestId) return;
+        acceptBinaryAudio = false;
+        stopPlayback();
+        sendJson({ type: "cancel", request_id: activeRequestId });
+        setStatus("正在停止上游合成…");
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+# 不把版本库元数据和本地构建缓存带入镜像。
+.git
+.github
+.DS_Store
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# 临时音频、模型缓存和本机工作目录不得进入镜像。
+work/
+**/*.wav
+**/*.mp3
+**/*.flac
+models/
+voices/
+data/
+tests/
+
+# 真实配置和声纹文件只在运行时注入；保留脱敏示例模板。
+.env
+**/.env
+*.env
+**/*.env
+*.env.*
+**/*.env.*
+!.env.example
+!**/.env.example
+!**/*.env.example
+deploy/config/tts-voices.json
+**/voiceprints/

@@ -105,7 +105,7 @@ SenseVoice 是具有音频理解能力的音频基础模型，包括语音识别
 pip install -r requirements.txt
 ```
 
-SenseVoiceSmall 示例与 FunASR 组合说话人分离路径需要 `funasr>=1.3.26`。如果你之前已经安装过本仓库，请先执行 `pip install -U "funasr>=1.3.26"`，再重新运行 demo。
+SenseVoiceSmall 示例与 FunASR 组合说话人分离路径需要 `funasr>=1.3.26`；服务端时间线/声纹适配层按方案锁定 `funasr==1.4.13`。如果你之前已经安装过本仓库，请先执行 `pip install -U "funasr>=1.3.26"`，再重新运行 demo。
 
 <a name="用法教程"></a>
 
@@ -223,8 +223,6 @@ print(text)
 
 ## 服务部署
 
-Undo
-
 ### 导出与测试
 
 <details><summary>ONNX 与 Libtorch 导出 </summary>
@@ -290,8 +288,17 @@ llama-funasr-sensevoice -m ./gguf/sensevoice-small-f16.gguf --vad ./gguf/fsmn-va
 
 ```shell
 export SENSEVOICE_DEVICE=cuda:0
-fastapi run --port 50000
+uvicorn realtime_api:app --host 0.0.0.0 --port 50000
 ```
+
+`realtime_api.py` 在保留 `/api/v1/asr` 的同时，新增了带 API Key 的
+`/api/v1/realtime` WebSocket：音频转写后调用 OpenAI 兼容的 LLM，并把回复逐段
+转交给 GPT-SoVITS 流式合成。完整的环境变量、事件协议与客户端接入方式见
+[实时对话服务说明](./README_realtime_zh.md)。
+
+本项目的 Windows 验证部署统一按 [Windows / WSL 模型下载与隔离部署指南](./docs/windows-wsl-deployment.zh-CN.md)
+执行：Mac 仅保留代码和文档，模型、依赖及推理全部在 Windows/WSL；新版先使用隔离目录与
+`http://localhost:50001`，验收前不替换现有 50000 服务。
 
 ### 使用 Docker 构建
 

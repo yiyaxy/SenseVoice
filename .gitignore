@@ -23,3 +23,12 @@ emotion2vec*
 GPT-SoVITS*
 modelscope_models
 examples/aishell/llm_asr_nar/*
+deploy/config/*.env
+!deploy/config/*.env.example
+.env
+.env.*
+!.env.example
+deploy/config/tts-voices.json
+!deploy/config/tts-voices.example.json
+data/voiceprints/
+*.voiceprints

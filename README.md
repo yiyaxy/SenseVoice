@@ -312,8 +312,16 @@ llama-funasr-sensevoice -m ./gguf/sensevoice-small-f16.gguf --vad ./gguf/fsmn-va
 ### Deployment with FastAPI
 ```shell
 export SENSEVOICE_DEVICE=cuda:0
-fastapi run --port 50000
+export SENSEVOICE_API_KEY='replace-with-service-key'
+uvicorn realtime_api:app --host 0.0.0.0 --port 50000
 ```
+
+The gateway keeps `POST /api/v1/asr` and also provides the authenticated
+`/api/v1/asr/stream`, `/api/v1/realtime`, and GPT-SoVITS streaming TTS routes.
+Configure the existing OpenAI-compatible LLM and GPT-SoVITS through environment
+variables; the complete protocol and Windows/WSL deployment steps are documented
+in [README_realtime_zh.md](./README_realtime_zh.md) and the
+[Windows/WSL deployment guide](./docs/windows-wsl-deployment.zh-CN.md).
 
 ## Finetune
 
@@ -339,7 +347,7 @@ docker build -t sensevoice .
 
 ### Run (GPU – default)
 ```bash
-docker run --gpus all -p 50000:50000 sensevoice
+docker run --rm --gpus all -p 50000:50000 -v sensevoice-models:/models sensevoice
 ```
 ### Run (CPU-only)
 ```bash

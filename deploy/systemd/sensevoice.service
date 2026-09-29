@@ -1,0 +1,25 @@
+[Unit]
+Description=SenseVoice realtime ASR and dialogue API
+After=network-online.target gpt-sovits.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=muushh
+WorkingDirectory=/data/voice-stack/apps/sensevoice
+EnvironmentFile=-/data/voice-stack/config/sensevoice.env
+Environment=MODELSCOPE_CACHE=/data/voice-stack/models/modelscope
+Environment=HF_HOME=/data/voice-stack/models/huggingface
+Environment=XDG_CACHE_HOME=/data/voice-stack/cache
+Environment=TMPDIR=/data/voice-stack/tmp
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ReadWritePaths=/data/voice-stack/data/voiceprints /data/voice-stack/logs /data/voice-stack/tmp
+ExecStart=/data/voice-stack/environments/sensevoice/bin/python -m uvicorn realtime_api:app --host 0.0.0.0 --port 50000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

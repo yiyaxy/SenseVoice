@@ -1,0 +1,14 @@
+{
+  "profiles": [
+    {
+      "voice_id": "assistant_default",
+      "name": "默认助手音色",
+      "ref_audio_path": "/data/voice-stack/voices/assistant.wav",
+      "prompt_text": "这里填写参考音频的准确逐字稿",
+      "prompt_lang": "zh",
+      "languages": ["all_zh", "all_yue", "en"],
+      "version": "1",
+      "enabled": true
+    }
+  ]
+}
